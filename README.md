@@ -94,3 +94,40 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 If you want to support this project, you can ☕ [**buy a coffee here**](https://www.buymeacoffee.com/kartoffeltoby).
 
 [![Buy me a coffee](https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=&slug=kartoffeltoby&button_colour=0ac982&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff)](https://www.buymeacoffee.com/kartoffeltoby)
+
+### RAMSES RF / Evohome zones
+
+Better Thermostat selects its native `ramses_cc` adapter for Evohome heating
+zones. The zone must belong to `ramses_cc`, expose `zone_index` and a `config`
+with finite `min_temp` / `max_temp` values, and have the
+`ramses_cc.set_zone_mode` action available. Controllers, DHW, ventilation
+entities and zones without this metadata are unsupported and are refused;
+there is no generic heating fallback.
+
+Use **Target Temperature Based** calibration (including **(AI) Time Based**)
+or no calibration. Offset and direct valve control are not supported. Better
+Thermostat sends the calculated device temperature, after safety limits and
+rounding, as a Celsius `permanent_override`. Turning the room off, closing
+heating demand, or opening a configured window/door sends the zone's configured
+minimum for frost protection. Permanent overrides survive Honeywell schedule
+switchpoints. Releasing the device or stopping Better Thermostat leaves the
+last override in place; restore the native schedule explicitly in RAMSES RF
+when returning control to Evohome.
+
+Confirmation requires the zone's native `mode` to report both
+`permanent_override` and the requested setpoint, with the corresponding climate
+state. A completed action alone does not confirm RF delivery. The existing
+control scheduler, write budget and confirmation timeout pace retries; no
+additional RF polling is introduced. Debug logs from
+`custom_components.better_thermostat.adapters.ramses_cc` include the entity,
+desired mode/setpoint and observed override. Missing action or configuration
+errors identify why a zone cannot be controlled. System-wide away/off modes
+are not changed by this adapter.
+
+Before deploying broadly, validate one zone: enable heating below the room
+temperature, raise and lower the target, open and close the window, cross a
+schedule switchpoint, restart Home Assistant, disconnect/reconnect the RF
+bridge, and change a target on the Honeywell controller. Check the zone display,
+entity state and RAMSES packets for the calculated temperature and permanent
+override, with no generic 25°C activation. Hardware validation requires an
+Evohome installation and is separate from the automated simulated-zone tests.

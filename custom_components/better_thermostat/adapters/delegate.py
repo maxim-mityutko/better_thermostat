@@ -38,7 +38,7 @@ from ..utils.retry import (
     command_cancellation_as_disconnect,
     device_call_deadline,
 )
-from .types import TrvAdapter
+from .types import CombinedControlAdapter, TrvAdapter
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -126,6 +126,8 @@ async def load_adapter(
             entity_id,
         )
     except Exception:
+        if integration == "ramses_cc":
+            raise
         _LOGGER.debug(
             "better_thermostat %s: adapter %s could not be imported for trv %s",
             self.device_name,
@@ -845,3 +847,32 @@ async def set_valve(self: BetterThermostat, entity_id: str, valve: float) -> boo
         trv.valve_report_answered = True
         return True
     return False
+
+
+async def apply_zone_control(
+    self: BetterThermostat,
+    entity_id: str,
+    hvac_mode: str,
+    temperature: float,
+    still_current: Callable[[], bool] | None = None,
+) -> None:
+    """Dispatch a complete decision through the existing guarded write channel."""
+    adapter = _adapter(self, entity_id)
+    if not isinstance(adapter, CombinedControlAdapter):
+        raise TypeError("Adapter has no combined control channel")
+
+    async def write(
+        host: AdapterHost, target: str, decision: tuple[str, float]
+    ) -> None:
+        if still_current is not None and not still_current():
+            raise WriteWithheldError("Zone decision was superseded while awaiting RF")
+        await adapter.apply_zone_control(host, target, *decision)
+
+    await _write_on_channel(
+        self,
+        entity_id,
+        "temperature",
+        "permanent zone override",
+        write,
+        (hvac_mode, temperature),
+    )

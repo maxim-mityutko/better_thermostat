@@ -813,7 +813,17 @@ DUAL_ROLE = RoleScenario(
     name="dual_role", trv=DUAL_ROLE_AC, cooler=None, cooler_entity_id=TRV_ID
 )
 
+RAMSES_ZONE = DeviceProfile(
+    name="ramses_zone",
+    integration="ramses_cc",
+    calibration="target_temp_based",
+    has_device_registry_entry=True,
+    min_temp=7.0,
+    model="Evohome zone",
+)
+
 SINGLE_ROLE_PROFILES = (
+    RAMSES_ZONE,
     GENERIC_HEAT_TRV,
     AUTO_COOL_AC,
     AUTO_ONLY_TRV,
@@ -842,6 +852,7 @@ GROUP_SCENARIOS = (GROUP_OF_THREE, MIXED_GRID_GROUP, VALVE_GROUP)
 """Every group of heads a test can drive as one room."""
 
 SHAPES_FROM_REPORTS: dict[str, DeviceProfile | RoleScenario | GroupScenario] = {
+    "an Evohome zone requiring permanent native overrides": RAMSES_ZONE,
     "a BLU TRV controlled only through its valve number": SHELLY_BLU_VALVE_TRV,
     "a head that drops a valve demand it is not written again": (
         BOSCH_BTH_RA_VALVE_TRV

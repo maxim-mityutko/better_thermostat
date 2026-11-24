@@ -22,6 +22,7 @@ from homeassistant.components.climate.const import (
 )
 from homeassistant.const import CONF_NAME, STATE_UNAVAILABLE, UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import (
     config_validation as cv,
     entity_registry as er,
@@ -39,6 +40,7 @@ from . import (
 )
 from .adapters.base import DeviceChannels
 from .adapters.delegate import load_adapter
+from .adapters.ramses_cc import validate_zone
 from .adapters.types import TrvAdapter
 from .model_fixes.model_quirks import (
     load_model_quirks,
@@ -1409,6 +1411,13 @@ def _unusable_climate_error(
         registry_entry = registry.async_get(entity_id)
         if registry_entry is not None and is_bt_climate_entity(registry_entry):
             return bt_error, {placeholder: entity_id}
+        if registry_entry is not None and registry_entry.platform == "ramses_cc":
+            try:
+                validate_zone(hass, entity_id)
+            except HomeAssistantError:
+                return "ramses_zone_unsupported", {"entity": entity_id}
+            if field == CONF_COOLER:
+                return "ramses_zone_unsupported", {"entity": entity_id}
         state = hass.states.get(entity_id)
         if (
             entity_id in kept_ids

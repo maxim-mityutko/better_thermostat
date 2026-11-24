@@ -35,6 +35,7 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 
 from custom_components.better_thermostat.adapters.base import published_reading
 from custom_components.better_thermostat.adapters.delegate import (
+    apply_zone_control,
     calibration_entity_disabled,
     get_calibration_offset,
     set_calibration_offset,
@@ -44,6 +45,7 @@ from custom_components.better_thermostat.adapters.delegate import (
     setpoint_on_device_grid,
     valve_channel_available,
 )
+from custom_components.better_thermostat.adapters.types import CombinedControlAdapter
 from custom_components.better_thermostat.adapters.valve_entity import (
     ValveEntityRange,
     valve_entity_range,
@@ -136,6 +138,7 @@ from custom_components.better_thermostat.utils.hvac_action import (
 )
 from custom_components.better_thermostat.utils.retry import (
     DeviceCallTimeoutError,
+    WriteWithheldError,
     command_cancellation_as_disconnect,
     device_call_deadline,
 )
@@ -2686,7 +2689,12 @@ async def control_trv(
 
             # The cycle decision normally arrives from control_queue; a
             # standalone invocation is its own cycle.
-            if cycle is None:
+            if cycle is None or isinstance(
+                self.real_trvs[entity_id].adapter, CombinedControlAdapter
+            ):
+                # A complete zone command must use the inputs that hold once
+                # this device owns the lock, including suppression that arrived
+                # while another device's RF call was in flight.
                 cycle = compute_control_cycle(self)
             self.dispatched_control_cycle = cycle
             snapshot, desired = cycle
@@ -2900,6 +2908,13 @@ async def control_trv(
             if self.real_trvs[entity_id].uses_valve_only_control:
                 # The valve above uses the ordinary safety hull, budget and
                 # retry handling. No thermostat write or confirmation follows.
+                _stamp_heartbeat(self)
+                return True
+
+            if isinstance(self.real_trvs[entity_id].adapter, CombinedControlAdapter):
+                await _control_zone(
+                    self, entity_id, snapshot, trv_desired, _temperature
+                )
                 _stamp_heartbeat(self)
                 return True
 
@@ -3589,7 +3604,13 @@ async def check_target_temperature(
         if not _current_set_temperatures:
             _timeout = 0
             break
-        if matches_any_setpoint(
+        if (
+            not isinstance(trv.adapter, CombinedControlAdapter)
+            or (
+                _awaited_setpoint is not None
+                and trv.adapter.zone_control_confirmed(_trv_state, _awaited_setpoint)
+            )
+        ) and matches_any_setpoint(
             as_published_setpoint(
                 _awaited_setpoint, _trv_state, self.hass.config.units.temperature_unit
             ),
@@ -3745,3 +3766,92 @@ async def check_calibration(
         if trv.calibration_write_generation == generation:
             trv.calibration_received = True
     return True
+
+
+async def _control_zone(
+    self: BetterThermostat,
+    entity_id: str,
+    snapshot: WorldSnapshot,
+    desired: TrvDesired,
+    temperature: float | None,
+) -> None:
+    """Apply the kernel's zone intent under the control lock and write budget."""
+    trv = self.real_trvs[entity_id]
+    adapter = trv.adapter
+    if not isinstance(adapter, CombinedControlAdapter):
+        return
+    low, high = adapter.zone_bounds(self, entity_id)
+    off = desired.hvac_mode == HVACMode.OFF
+    if off:
+        temperature = low
+    else:
+        if temperature is None or not math.isfinite(temperature):
+            raise ValueError("Zone heating requires a finite calculated setpoint")
+        temperature = _through_safety_hull(
+            snapshot, entity_id, setpoint=temperature
+        ).setpoint
+        if temperature is None:
+            return
+        temperature = max(
+            low, min(high, setpoint_on_device_grid(self, entity_id, temperature))
+        )
+    mode = HVACMode.OFF if temperature <= low else HVACMode.HEAT
+    state = self.hass.states.get(entity_id)
+    if not state_is_live(state):
+        _schedule_reachability_retry(self, entity_id)
+        return
+    if adapter.zone_control_confirmed(state, temperature):
+        trv.remember_setpoint_held(temperature)
+        trv.last_hvac_mode = mode
+        clear_unapplied_setpoint(self, entity_id)
+        return
+    if not off and (
+        _setpoint_turned_during_cycle(self, entity_id)
+        or _mode_switched_during_cycle(self, entity_id, trv, state.state)
+    ):
+        return
+    # An identical in-flight decision waits for its readback watchdog. A new
+    # suppression or target supersedes it through the same serialized path.
+    if trv.commanded_setpoint == temperature and not trv.target_temperature_received:
+        return
+    if not _consume_budget(self, entity_id, "setpoint", bypass=off):
+        _schedule_budget_retry(
+            self, entity_id, _budget_remaining(self, entity_id, "setpoint")
+        )
+        return
+    trv.commanded_setpoint = temperature
+    trv.last_hvac_mode = mode
+    trv.remember_setpoint_written(temperature)
+    trv.unapplied_setpoint_writes += 1
+
+    def inputs() -> tuple[object, ...]:
+        return (
+            _user_intent(self),
+            self.kernel_state.window,
+            self.kernel_state.door,
+            self.call_for_heat,
+            effective_room_temperature(self),
+            trv.current_temperature,
+        )
+
+    decided_from = inputs()
+    try:
+        await apply_zone_control(
+            self,
+            entity_id,
+            mode,
+            temperature,
+            still_current=lambda: inputs() == decided_from,
+        )
+    except WriteWithheldError:
+        _schedule_budget_retry(self, entity_id, 1)
+
+    finally:
+        trv.target_temperature_received = False
+        self.task_manager.create_task(
+            check_target_temperature(
+                self, entity_id, trv.last_setpoint_write_id, temperature
+            ),
+            name=f"bt_check_target_temp_{entity_id}",
+        )
+        _schedule_budget_retry(self, entity_id, WRITE_CONFIRM_TIMEOUT_S + 3)

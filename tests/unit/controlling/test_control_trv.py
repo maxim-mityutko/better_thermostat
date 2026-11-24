@@ -5406,3 +5406,191 @@ class TestUnappliedSetpointRun:
         mock_self.devices_errors = ["climate.other"]
 
         assert get_device_errors(mock_self) == ["climate.other", self.HEAD]
+
+
+@pytest.mark.parametrize(
+    "options,calculated,expected",
+    [
+        ({}, 22.3, 22.5),
+        ({"bt_hvac_mode": HVACMode.OFF}, None, 7.0),
+        ({"call_for_heat": False}, 22.0, 7.0),
+        ({"window_open": True}, 22.0, 7.0),
+        ({}, 7.0, 7.0),
+    ],
+)
+async def test_ramses_cycle_sends_the_calculated_target_or_frost(
+    options, calculated, expected
+):
+    """The zone must receive the calibrated decision with suppression preserved."""
+    from custom_components.better_thermostat.adapters import ramses_cc
+
+    trv = _default_trv_config(
+        adapter=ramses_cc, min_temp=7.0, target_temperature_received=True
+    )
+    host = _make_mock_self(trv_state="heat", real_trvs={"climate.trv1": trv}, **options)
+    state = State(
+        "climate.trv1",
+        "heat",
+        {
+            "temperature": 18.0,
+            "current_temperature": 20.0,
+            "min_temp": 7.0,
+            "max_temp": 30.0,
+            "mode": {"mode": "follow_schedule", "setpoint": 18.0},
+            "config": {"min_temp": 7.0, "max_temp": 30.0},
+        },
+    )
+    host.hass.states.get.return_value = state
+    with (
+        patch.object(ramses_cc, "zone_bounds", return_value=(7.0, 30.0)),
+        patch(
+            f"{_CTRL}.convert_outbound_states",
+            return_value={"system_mode": "heat", "temperature": calculated},
+        ),
+        patch(f"{_CTRL}._schedule_budget_retry"),
+        patch(f"{_CTRL}.asyncio.sleep", new_callable=AsyncMock),
+    ):
+        assert await control_trv(host, "climate.trv1")
+    host.hass.services.async_call.assert_awaited_once_with(
+        "ramses_cc",
+        "set_zone_mode",
+        {
+            "entity_id": "climate.trv1",
+            "mode": "permanent_override",
+            "setpoint": expected,
+        },
+        blocking=True,
+        context=host.context,
+    )
+
+
+async def test_ramses_schedule_at_matching_target_still_needs_permanent_override():
+    """An equal scheduled temperature must not prevent taking permanent control."""
+    from custom_components.better_thermostat.adapters import ramses_cc
+
+    trv = _default_trv_config(adapter=ramses_cc, target_temperature_received=True)
+    host = _make_mock_self(trv_state="heat", real_trvs={"climate.trv1": trv})
+    host.hass.states.get.return_value = State(
+        "climate.trv1",
+        "heat",
+        {
+            "temperature": 22.0,
+            "mode": {"mode": "follow_schedule", "setpoint": 22.0},
+            "config": {"min_temp": 7.0, "max_temp": 30.0},
+        },
+    )
+    with (
+        patch.object(ramses_cc, "zone_bounds", return_value=(7.0, 30.0)),
+        patch(
+            f"{_CTRL}.convert_outbound_states",
+            return_value={"system_mode": "heat", "temperature": 22.0},
+        ),
+        patch(f"{_CTRL}._schedule_budget_retry"),
+        patch(f"{_CTRL}.asyncio.sleep", new_callable=AsyncMock),
+    ):
+        await control_trv(host, "climate.trv1")
+        await control_trv(host, "climate.trv1")
+    assert host.hass.services.async_call.await_count == 1
+
+
+async def test_ramses_window_opened_during_write_supersedes_heating():
+    """A window event arriving during RF transmission must leave the zone at frost."""
+    from custom_components.better_thermostat.adapters import ramses_cc
+
+    trv = _default_trv_config(
+        adapter=ramses_cc, min_temp=7.0, target_temperature_received=True
+    )
+    host = _make_mock_self(trv_state="heat", real_trvs={"climate.trv1": trv})
+    host.hass.states.get.return_value = State(
+        "climate.trv1",
+        "heat",
+        {
+            "temperature": 18.0,
+            "mode": {"mode": "follow_schedule", "setpoint": 18.0},
+            "config": {"min_temp": 7.0, "max_temp": 30.0},
+        },
+    )
+
+    async def write(*args, **kwargs):
+        host.window_open = True
+        host.kernel_state = _kernel_state_for(host)
+
+    host.hass.services.async_call.side_effect = write
+    with (
+        patch.object(ramses_cc, "zone_bounds", return_value=(7.0, 30.0)),
+        patch(
+            f"{_CTRL}.convert_outbound_states",
+            return_value={"system_mode": "heat", "temperature": 22.0},
+        ),
+        patch(f"{_CTRL}._schedule_budget_retry"),
+        patch(f"{_CTRL}.asyncio.sleep", new_callable=AsyncMock),
+    ):
+        stale_cycle = compute_control_cycle(host)
+        await control_trv(host, "climate.trv1", cycle=stale_cycle)
+        await control_trv(host, "climate.trv1", cycle=stale_cycle)
+    assert [
+        call.args[2]["setpoint"]
+        for call in host.hass.services.async_call.await_args_list
+    ] == [22.0, 7.0]
+
+
+@pytest.mark.parametrize("reason", ["budget", "manual_setpoint", "manual_mode"])
+async def test_ramses_regulation_waits_for_budget_and_manual_changes(reason):
+    """Ordinary regulation must respect RF pacing and the user's manual changes."""
+    from custom_components.better_thermostat.adapters import ramses_cc
+
+    trv = _default_trv_config(adapter=ramses_cc, target_temperature_received=True)
+    host = _make_mock_self(trv_state="heat", real_trvs={"climate.trv1": trv})
+    host.hass.states.get.return_value = State(
+        "climate.trv1", "heat", {"temperature": 18.0}
+    )
+    with (
+        patch.object(ramses_cc, "zone_bounds", return_value=(7.0, 30.0)),
+        patch(
+            f"{_CTRL}.convert_outbound_states",
+            return_value={"system_mode": "heat", "temperature": 22.0},
+        ),
+        patch(f"{_CTRL}._consume_budget", return_value=reason != "budget"),
+        patch(
+            f"{_CTRL}._setpoint_turned_during_cycle",
+            return_value=reason == "manual_setpoint",
+        ),
+        patch(
+            f"{_CTRL}._mode_switched_during_cycle", return_value=reason == "manual_mode"
+        ),
+        patch(f"{_CTRL}._schedule_budget_retry") as retry,
+        patch(f"{_CTRL}.asyncio.sleep", new_callable=AsyncMock),
+    ):
+        await control_trv(host, "climate.trv1")
+    host.hass.services.async_call.assert_not_awaited()
+    assert retry.called is (reason == "budget")
+
+
+async def test_ramses_watchdog_does_not_confirm_a_matching_scheduled_setpoint():
+    """RF confirmation must establish permanence before retiring the command."""
+    from custom_components.better_thermostat.adapters import ramses_cc
+
+    trv = _default_trv_config(adapter=ramses_cc, target_temperature_received=False)
+    trv.commanded_setpoint = 22.0
+    trv.remember_setpoint_written(22.0)
+    host = _make_mock_self(trv_state="heat", real_trvs={"climate.trv1": trv})
+    host.hass.config.units.temperature_unit = UnitOfTemperature.CELSIUS
+    host.hass.states.get.return_value = State(
+        "climate.trv1",
+        "heat",
+        {
+            "temperature": 22.0,
+            "mode": {"mode": "follow_schedule", "setpoint": 22.0},
+            "config": {"min_temp": 7.0, "max_temp": 30.0},
+        },
+    )
+    before = trv.confirmed_write_id
+    with (
+        patch(f"{_CTRL}.WRITE_CONFIRM_TIMEOUT_S", 0),
+        patch(f"{_CTRL}.asyncio.sleep", new_callable=AsyncMock),
+    ):
+        await check_target_temperature(
+            host, "climate.trv1", trv.last_setpoint_write_id, 22.0
+        )
+    assert trv.confirmed_write_id == before
+    assert trv.target_temperature_received

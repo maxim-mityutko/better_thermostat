@@ -240,6 +240,15 @@ class SimulatedClimate(ClimateEntity):
         self.set_temperature_calls: list[float | dict[str, float]] = []
         self.set_hvac_mode_calls: list[str] = []
         self.drop_next_setpoint_write = False
+        if profile.integration == "ramses_cc":
+            self._attr_extra_state_attributes = {
+                "zone_index": "00",
+                "config": {"min_temp": profile.min_temp, "max_temp": profile.max_temp},
+                "mode": {
+                    "mode": "follow_schedule",
+                    "setpoint": profile.target_temperature,
+                },
+            }
 
     @property
     @override
@@ -612,6 +621,33 @@ async def build_devices(hass, *profiles: DeviceProfile) -> list[SimulatedClimate
             selects.append(selector)
         entities.append(entity)
 
+    if any(p.integration == "ramses_cc" for p in profiles):
+
+        async def set_zone_mode(call):
+            entity = next(e for e in entities if e.entity_id == call.data["entity_id"])
+            temperature = float(call.data["setpoint"])
+            entity.set_temperature_calls.append(temperature)
+            if entity.drop_next_setpoint_write:
+                entity.drop_next_setpoint_write = False
+                return
+            entity._attr_native_target_temperature = temperature
+            entity._attr_hvac_mode = (
+                HVACMode.OFF
+                if temperature <= entity.profile.min_temp
+                else HVACMode.HEAT
+            )
+            entity._attr_extra_state_attributes = {
+                "zone_index": "00",
+                "config": {
+                    "min_temp": entity.profile.min_temp,
+                    "max_temp": entity.profile.max_temp,
+                },
+                "mode": {"mode": call.data["mode"], "setpoint": temperature},
+            }
+            entity.async_write_ha_state()
+
+        hass.services.async_register("ramses_cc", "set_zone_mode", set_zone_mode)
+
     if with_device:
         await _add_devices_from_config_entry(hass, entities, numbers, selects)
     else:
@@ -642,6 +678,11 @@ async def _add_devices_from_config_entry(hass, entities, numbers, selects) -> No
     setup fails with "Platform test.config_flow not found", and without the
     mocked flow handler with "Flow handler not found".
     """
+    integration = (
+        "ramses_cc"
+        if entities[0].profile.integration == "ramses_cc"
+        else DEVICE_INTEGRATION
+    )
     platforms = (
         [CLIMATE_DOMAIN]
         + ([NUMBER_DOMAIN] if numbers else [])
@@ -651,13 +692,13 @@ async def _add_devices_from_config_entry(hass, entities, numbers, selects) -> No
     async def async_setup_entry(hass, entry):
         await hass.config_entries.async_forward_entry_setups(entry, platforms)
 
-    mock_integration(
-        hass, MockModule(DEVICE_INTEGRATION, async_setup_entry=async_setup_entry)
-    )
-    mock_platform(hass, f"{DEVICE_INTEGRATION}.config_flow", None)
-    setup_test_component_platform(
+    mock_integration(hass, MockModule(integration, async_setup_entry=async_setup_entry))
+    mock_platform(hass, f"{integration}.config_flow", None)
+    climate_platform = setup_test_component_platform(
         hass, CLIMATE_DOMAIN, entities, from_config_entry=True
     )
+    if integration != DEVICE_INTEGRATION:
+        mock_platform(hass, f"{integration}.climate", climate_platform)
     if numbers:
         setup_test_component_platform(
             hass, NUMBER_DOMAIN, numbers, from_config_entry=True
@@ -666,9 +707,9 @@ async def _add_devices_from_config_entry(hass, entities, numbers, selects) -> No
         setup_test_component_platform(
             hass, SELECT_DOMAIN, selects, from_config_entry=True
         )
-    device_entry = MockConfigEntry(domain=DEVICE_INTEGRATION)
+    device_entry = MockConfigEntry(domain=integration)
     device_entry.add_to_hass(hass)
-    with mock_config_flow(DEVICE_INTEGRATION, ConfigFlow):
+    with mock_config_flow(integration, ConfigFlow):
         assert await hass.config_entries.async_setup(device_entry.entry_id)
         await hass.async_block_till_done()
 

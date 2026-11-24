@@ -94,6 +94,7 @@
       "target_temp_min_above_max": "The target minimum temperature must not exceed the target maximum temperature.",
       "trv_not_found": "Home Assistant does not know {trv}. Select a thermostat that exists.",
       "trv_is_better_thermostat": "{trv} is a Better Thermostat. Select a real thermostat instead.",
+      "ramses_zone_unsupported": "{entity} must be a RAMSES RF heating zone with zone configuration and the set_zone_mode action available. Controllers, cooling and ventilation are not supported.",
       "trv_no_target_temperature": "{trv} does not accept a target temperature. Select a thermostat that does.",
       "cooler_is_better_thermostat": "{cooler} is a Better Thermostat. Select a real cooling device instead.",
       "cooler_no_target_temperature": "{cooler} does not accept a target temperature. Select a cooling device that does.",
@@ -195,6 +196,7 @@
       "trv_in_use": "{trv} is already controlled by the Better Thermostat {entry}. A thermostat can belong to one Better Thermostat only.",
       "trv_not_found": "Home Assistant does not know {trv}. Select a thermostat that exists.",
       "trv_is_better_thermostat": "{trv} is a Better Thermostat. Select a real thermostat instead.",
+      "ramses_zone_unsupported": "{entity} must be a RAMSES RF heating zone with zone configuration and the set_zone_mode action available. Controllers, cooling and ventilation are not supported.",
       "trv_no_target_temperature": "{trv} does not accept a target temperature. Select a thermostat that does.",
       "cooler_is_better_thermostat": "{cooler} is a Better Thermostat. Select a real cooling device instead.",
       "cooler_no_target_temperature": "{cooler} does not accept a target temperature. Select a cooling device that does.",
@@ -652,6 +654,9 @@
     }
   },
   "exceptions": {
+    "ramses_zone_error": {
+      "message": "Cannot control the RAMSES RF zone: {reason}"
+    },
     "unsupported_hvac_mode": {
       "message": "{device_name} does not support the HVAC mode {mode}. Supported modes: {modes}."
     },

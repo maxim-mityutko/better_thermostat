@@ -16,7 +16,7 @@ from collections.abc import Mapping, Set
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from homeassistant.core import Context, HomeAssistant
+    from homeassistant.core import Context, HomeAssistant, State
 
     from custom_components.better_thermostat.trv import Trv
 
@@ -158,4 +158,30 @@ class TrvAdapter(Protocol):
         ...
 
 
-__all__ = ["AdapterHost", "AdapterProbeHost", "TrvAdapter"]
+__all__ = ["AdapterHost", "AdapterProbeHost", "CombinedControlAdapter", "TrvAdapter"]
+
+
+@runtime_checkable
+class CombinedControlAdapter(Protocol):
+    """Optional complete zone writes and native readback confirmation."""
+
+    def zone_bounds(
+        self, host: AdapterProbeHost, entity_id: str, /
+    ) -> tuple[float, float]:
+        """Return validated native Celsius bounds."""
+        ...
+
+    async def apply_zone_control(
+        self,
+        host: AdapterHost,
+        entity_id: str,
+        hvac_mode: str,
+        temperature: float | None,
+        /,
+    ) -> None:
+        """Apply the validated mode and calculated setpoint together."""
+        ...
+
+    def zone_control_confirmed(self, state: State, temperature: float, /) -> bool:
+        """Whether observed state confirms the complete override."""
+        ...
